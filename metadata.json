@@ -1,0 +1,6 @@
+{
+  "name": "M-U-N Gallery",
+  "description": "Your Moments, Beautifully. A flagship dark Liquid Glass gallery app with real device photo/video playback, albums, favorites, editing, and glassmorphism customization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

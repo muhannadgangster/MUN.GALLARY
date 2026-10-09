@@ -1,0 +1,185 @@
+name: Build & Release Android APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag name (e.g., v1.0.0)'
+        required: false
+        type: string
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Package APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make Gradle Wrapper Executable
+        run: chmod +x ./gradlew
+
+      - name: Prepare Secrets Configuration
+        run: |
+          if [ ! -f ".env" ]; then
+            if [ -f ".env.example" ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
+
+      - name: Build Debug APK
+        run: |
+          echo "Building Debug APK..."
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Verify & Package Debug APK Output
+        run: |
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          if [ -f "$DEBUG_APK" ]; then
+            echo "SUCCESS: Debug APK found at $DEBUG_APK"
+            mkdir -p dist
+            cp "$DEBUG_APK" dist/app-debug.apk
+            cp "$DEBUG_APK" dist/MUN-Gallery-app-debug.apk
+          else
+            echo "ERROR: Debug APK was not generated!"
+            exit 1
+          fi
+
+      - name: Configure Release Signing & Build Release APK
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          KEYSTORE_FILE="${RUNNER_TEMP}/release-upload.jks"
+          
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            echo "Found RELEASE_KEYSTORE_BASE64 secret. Decoding production keystore..."
+            echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+            STORE_PASS="$STORE_PASSWORD"
+            KEY_PASS="$KEY_PASSWORD"
+          else
+            echo "No production keystore secret configured. Creating CI upload keystore..."
+            STORE_PASS="android_ci_keystore_pass"
+            KEY_PASS="android_ci_keystore_pass"
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_FILE" \
+              -alias upload \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "$STORE_PASS" \
+              -keypass "$KEY_PASS" \
+              -dname "CN=M-U-N Gallery, OU=Release, O=M-U-N, L=Global, ST=Android, C=US"
+          fi
+
+          echo "Building Release APK..."
+          KEYSTORE_PATH="$KEYSTORE_FILE" \
+          STORE_PASSWORD="$STORE_PASS" \
+          KEY_PASSWORD="$KEY_PASS" \
+          ./gradlew assembleRelease --stacktrace
+
+          RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
+          if [ -f "$RELEASE_APK" ]; then
+            echo "SUCCESS: Release APK found at $RELEASE_APK"
+            mkdir -p dist
+            cp "$RELEASE_APK" dist/MUN-Gallery-release.apk
+          else
+            echo "WARNING: Release APK was not generated, keeping debug APKs."
+          fi
+
+      - name: Compute Checksums
+        run: |
+          cd dist
+          echo "### SHA-256 Checksums"
+          sha256sum *.apk | tee checksums.txt
+
+      - name: Upload APKs as Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mun-gallery-apks
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Determine Release Configuration
+        id: release_check
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              TAG_NAME="${GITHUB_REF#refs/tags/}"
+            elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.release_tag }}" ]; then
+              TAG_NAME="${{ github.event.inputs.release_tag }}"
+            else
+              TAG_NAME="v1.0.0"
+            fi
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish GitHub Release
+        if: steps:release_check.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_check.outputs.tag_name }}
+          name: "M-U-N Gallery ${{ steps.release_check.outputs.tag_name }}"
+          body: |
+            ## M-U-N Gallery — Your Moments, Beautifully.
+
+            ### ڈائریکٹ ڈاؤن لوڈ اور انسٹالیشن (Direct Download & Install):
+            1. نیچے **Assets** سیکشن میں سے **`app-debug.apk`** یا **`MUN-Gallery-app-debug.apk`** ڈاؤن لوڈ کریں۔
+            2. ڈاؤن لوڈ مکمل ہونے پر فائل پر ٹیپ کر کے انسٹال کریں۔
+            3. اگر اینڈرائیڈ پوچھے تو براؤزر کے لیے **"Install unknown apps"** (نامعلوم ایپس انسٹال کرنے کی اجازت) آن کر دیں۔
+            4. ایپ اوپن کر کے **Allow Access** پر کلک کریں اور اپنی تصاویر اور ویڈیوز دیکھیں۔
+
+            ### What's included in this release:
+            - **`app-debug.apk`**: براہ راست انسٹال ہونے والی اصلی اینڈرائیڈ اے پی کے (Directly installable APK for any Android phone)
+            - **`MUN-Gallery-app-debug.apk`**: M-U-N Gallery Debug APK
+            - **`MUN-Gallery-release.apk`**: M-U-N Gallery Release APK
+            - **Liquid Glass Design**: ڈارک گلاس اور نیون ایفیکٹ کے ساتھ پریمیم انٹرفیس
+            - **Offline-First Privacy**: تمام میڈیا آپ کے فون پر محفوظ رہتا ہے
+
+            ### SHA-256 Checksums:
+            ```
+            $(cat dist/checksums.txt)
+            ```
+          files: |
+            dist/app-debug.apk
+            dist/MUN-Gallery-app-debug.apk
+            dist/MUN-Gallery-release.apk
+            dist/checksums.txt
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
